@@ -31,7 +31,7 @@ dt{color:var(--mut)}dd{margin:0;text-align:right;font-family:ui-monospace,Menlo,
 .note{font-size:12px;color:var(--mut);margin:6px 0 0}
 canvas{display:block;width:100%;height:180px;margin-top:8px}
 </style></head><body><main>
-<div class="row" style="justify-content:space-between;align-items:center"><h1 data-i="title" style="margin:4px 0"></h1><select id="lg" aria-label="Language" style="width:auto"><option value="ja">日本語</option><option value="en">English</option></select></div>
+<div class="row" style="justify-content:space-between;align-items:center"><h1 data-i="title" style="margin:4px 0"></h1><button id="lg" type="button" aria-label="Language"></button></div>
 <section class="pn">
 <div class="row">
 <label><span data-i="note"></span><select id="nn"></select></label>
@@ -75,9 +75,10 @@ how1:o=>`From the beat difference of the ±${o} Hz references`,how2:'From the be
 let LG=(()=>{try{const v=localStorage.getItem('lg');if(v&&I[v])return v}catch(e){}return /^ja/i.test(navigator.language||'')?'ja':'en'})(),MSG=()=>t('hint'),COL={};
 const t=(k,...a)=>{const v=I[LG][k];return typeof v==='function'?v(...a):v},sv=(e,v)=>{if(e._v!==v){e._v=v;e.textContent=v}};
 function setMsg(f){MSG=f;sv($('msg'),f())}
-function applyLang(){document.documentElement.lang=LG;document.title=t('title');document.querySelectorAll('[data-i]').forEach(e=>e.textContent=t(e.dataset.i));
+function applyLang(){document.documentElement.lang=LG;document.title=t('title');$('lg').textContent=LG==='ja'?'English':'日本語';$('lg').lang=LG==='ja'?'en':'ja';   // the button names the language you will switch to
+document.querySelectorAll('[data-i]').forEach(e=>e.textContent=t(e.dataset.i));
 $('st').textContent=t(ctx?'stop':'start');sv($('msg'),MSG());cv.setAttribute('aria-label',t('alt'));if(!ctx)sv($('s'),t('sub0'))}
-$('lg').value=LG;$('lg').onchange=()=>{LG=$('lg').value;try{localStorage.setItem('lg',LG)}catch(e){}applyLang()};
+$('lg').onclick=()=>{LG=LG==='ja'?'en':'ja';try{localStorage.setItem('lg',LG)}catch(e){}applyLang()};
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>{COL={}});
 NM.forEach((n,i)=>$('nn').add(new Option(n,i)));for(let o=0;o<=8;o++)$('oc').add(new Option(o,o));
 $('nn').value=9;$('oc').value=4;
