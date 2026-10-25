@@ -59,16 +59,16 @@ canvas{display:block;width:100%;height:180px;margin-top:8px}
 </main>
 <script>
 const $=id=>document.getElementById(id),NM=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
-let nodeA,ctx,stream,bp1,bp2,node,osc,f0=440,last='note',D={mode:'beat',n:0,gate:false},AB=new Float32Array(8192),AR={f:null,cl:0};
+let ctx,stream,bp1,bp2,W,ENG,S=null,M='beat',osc,f0=440,last='note',gen=-1,hh=0,hn=0;const HV=[0,1,2].map(()=>new Float32Array(1200));
 const I={ja:{title:'高精度Webチューナー',note:'音名',oct:'オクターブ',a4:'基準 A4 (Hz)',hz:'目標周波数 (Hz)',auto:'オート（音階を自動判定）',meth:'測定方式',beat:'うなり（高精度）',ac:'自己相関（高速）',start:'マイク開始',stop:'停止',ref:'基準音を鳴らす',
 hint:'マイクを許可すると測定を始めます。基準音を鳴らす場合はイヤホンを推奨します。',sub0:'目標との差（＋は高い、－は低い）',tgt:'目標',det:'検出周波数',cent:'ずれ（セント）',info:'詳細',alt:'うなり波形',
-running:s=>`測定中（サンプルレート ${s} Hz）`,stopped:'停止しました。',micerr:e=>`マイクを使えませんでした：${e}。ブラウザのマイク許可と、ページがマイク利用可能な環境で開かれているか確認してください。`,
+running:(s,k)=>`測定中（${k}・サンプルレート ${s} Hz）`,stopped:'停止しました。',micerr:e=>`マイクを使えませんでした：${e}。ブラウザのマイク許可と、ページがマイク利用可能な環境で開かれているか確認してください。`,
 cvnone:'マイク開始後、うなり波形（直近6秒）を表示します',cvac:'自己相関モードではうなり波形は表示されません',cvt:'うなり波形（直近6秒）',laneM:o=>`基準−${o}Hz`,lane0:'基準±0',laneP:o=>`基準+${o}Hz`,
 autop:n=>`オート ${n}：`,acinfo:c=>`自己相関 明瞭度 ${c}`,acrt:'自己相関（リアルタイム）',detecting:'音階を判定中…',wait:'信号を待っています',beatinfo:s=>`うなり ${s} Hz`,measuring:'測定中…（約1〜2秒）',
 how1:o=>`±${o}Hz基準のうなり差から算出`,how2:'基準信号のうなり周期から算出'},
 en:{title:'High-Precision Web Tuner',note:'Note',oct:'Octave',a4:'Reference A4 (Hz)',hz:'Target frequency (Hz)',auto:'Auto (detect the note)',meth:'Method',beat:'Beat (high precision)',ac:'Autocorrelation (fast)',start:'Start mic',stop:'Stop',ref:'Play reference tone',
 hint:'Allow the microphone to start measuring. Use earphones when playing the reference tone.',sub0:'Offset from target (+ sharp, − flat)',tgt:'Target',det:'Detected',cent:'Offset (cents)',info:'Details',alt:'Beat waveform',
-running:s=>`Measuring (sample rate ${s} Hz)`,stopped:'Stopped.',micerr:e=>`Could not use the microphone: ${e}. Check the browser permission and that this page is allowed to use the microphone.`,
+running:(s,k)=>`Measuring (${k}, sample rate ${s} Hz)`,stopped:'Stopped.',micerr:e=>`Could not use the microphone: ${e}. Check the browser permission and that this page is allowed to use the microphone.`,
 cvnone:'The beat waveform (last 6 s) appears after you start the mic',cvac:'The beat waveform is not shown in autocorrelation mode',cvt:'Beat waveform (last 6 s)',laneM:o=>`Ref −${o} Hz`,lane0:'Ref ±0',laneP:o=>`Ref +${o} Hz`,
 autop:n=>`Auto ${n}: `,acinfo:c=>`Autocorrelation clarity ${c}`,acrt:'Autocorrelation (real-time)',detecting:'Detecting the note…',wait:'Waiting for a signal',beatinfo:s=>`Beats ${s} Hz`,measuring:'Measuring… (about 1–2 s)',
 how1:o=>`From the beat difference of the ±${o} Hz references`,how2:'From the beat period of the reference signals'}};
@@ -87,79 +87,102 @@ function fromHz(){f0=Math.min(4000,Math.max(20,+$('hz').value||440));last='hz';n
 function near(){const m=Math.round(69+12*Math.log2(f0/+$('a4').value));if(m>=12&&m<120){$('nn').value=((m%12)+12)%12;$('oc').value=Math.floor(m/12)-1}}
 const man=()=>{$('au').checked=false};   // editing the target by hand turns auto off
 const lock=()=>{for(const i of['nn','oc','hz'])$(i).disabled=$('au').checked};   // auto on: note/octave/Hz are display-only (greyed out)
-$('au').onchange=()=>{AU.f=null;AU.cnt=0;lock()};lock();
+$('au').onchange=()=>{cfg({auto:$('au').checked});lock()};lock();
 $('nn').onchange=$('oc').onchange=()=>{man();fromNote()};$('hz').onchange=()=>{man();fromHz()};
-$('a4').onchange=()=>last==='note'?fromNote():fromHz();
-$('md').onchange=()=>{D.mode=$('md').value;resetDSP()};
-function apply(){resetDSP();tone();$('t').textContent=f0.toFixed(3)+' Hz'}
-// ---- DSP helpers
-const OFS=4;   // offset (Hz) of the two side references from the target
+$('a4').onchange=()=>{cfg({a4:+$('a4').value});last==='note'?fromNote():fromHz()};
+$('md').onchange=()=>{M=$('md').value;cfg({mode:M,reset:true})};
+function apply(){cfg({f0,reset:true});setBP();tone();$('t').textContent=f0.toFixed(3)+' Hz'}
+// ---- DSP engine. Self-contained (no outer references) so that the very same source runs inside an AudioWorklet
+// (built from EngineFactory.toString()) or, if worklets are unavailable, on the main thread via ScriptProcessorNode.
+const OFS=4;   // keep equal to OFS inside EngineFactory (used here for labels only)
+function EngineFactory(){
+const OFS=4;   // offset (Hz) of the two outer reference sines from the target
 function lp(fc,fs){const w=2*Math.PI*fc/fs,c=Math.cos(w),a=Math.sin(w)/1.4142,a0=1+a;return{b0:(1-c)/2/a0,b1:(1-c)/a0,b2:(1-c)/2/a0,a1:-2*c/a0,a2:(1-a)/a0}}
 class BQ{constructor(c){this.c=c;this.x1=this.x2=this.y1=this.y2=0}
 p(x){const c=this.c,y=c.b0*x+c.b1*this.x1+c.b2*this.x2-c.a1*this.y1-c.a2*this.y2;this.x2=this.x1;this.x1=x;this.y2=this.y1;this.y1=y;return y}}
-function resetDSP(){if(!ctx)return;const fs=ctx.sampleRate,fc=Math.min(f0*0.45,60),mk=()=>[new BQ(lp(fc,fs)),new BQ(lp(fc,fs))];
-// three reference sines: f0-1, f0, f0+1 Hz. Each is summed with the mic signal and gets its own beat detector.
-D.ch=[-OFS,0,OFS].map(df=>{const w=2*Math.PI*(f0+df)/fs;return{df,sn:0,cs:1,cw:Math.cos(w),sw:Math.sin(w),L:mk(),mean:1,amp:0,pd:0,st:0,rz:0,fz:0,R:[],F:[],est:null,last:0,hv:new Float32Array(1200)}});
-Object.assign(D,{fs,gain:0,rms2:0,n:0,on:0,gate:false,dec:Math.max(1,Math.round(fs/200)),dc:0,hh:0,hn:0});
-bp1.frequency.value=bp2.frequency.value=f0;AR.f=null}
-// ---- beat mode: (mic + reference sine)^2 -> low-pass -> envelope zero-crossings, once per reference
-function push(c,a,t){if(!t)return;if(a.length>=2){const p=(a[a.length-1]-a[0])/(a.length-1),q=(t-a[a.length-1])/p;if(q<0.7||q>1.43)a.length=0}
-a.push(t);while(a.length>7||(a.length>3&&t-a[0]>1.2*D.fs))a.shift();   // keep ~1.2 s of crossings so start-up transients age out fast
-c.last=D.n;let num=0,den=0;for(const b of [c.R,c.F])if(b.length>1){num+=b.length-1;den+=b[b.length-1]-b[0]}
-c.est=den>0?num/den*D.fs:null}
-function beat(inp){const d=D,fs=d.fs,ka=1/(0.3*fs),kw=1/(0.05*fs),km=1/(6*fs),kd=1-1/(6*fs),W=0.25*fs,ch=d.ch;let gain=d.gain,rec;
-for(let i=0;i<inp.length;i++){const x=inp[i];d.n++;d.rms2+=(x*x-d.rms2)*(d.on<W?kw:ka);
-if((i&15)===0){d.gate=d.rms2>4e-6;gain=d.gate?0.7071/Math.sqrt(d.rms2):0}   // AGC gain refreshed every 16 samples (sqrt + divide is the costly part)
-d.on=d.gate?d.on+1:0;const y=Math.max(-2,Math.min(2,x*gain));rec=++d.dc>=d.dec;if(rec)d.dc=0;
-for(let k=0;k<3;k++){const c=ch[k],sn=c.sn*c.cw+c.cs*c.sw;c.cs=c.cs*c.cw-c.sn*c.sw;c.sn=sn;   // rotating oscillator instead of Math.sin
-const s=y+sn,v=c.L[1].p(c.L[0].p(s*s));if(rec)c.hv[d.hh]=v;
-if(d.on<W){c.mean=1;c.amp=0;c.R.length=c.F.length=0;c.est=null;c.st=0;c.pd=0;continue}   // warm-up: let AGC and filters settle
-const m=c.mean;c.mean+=(v-m)*km;const dv=v-m;c.amp=Math.max(Math.abs(dv),c.amp*kd);
-if(c.pd<=0&&dv>0)c.rz=d.n-1-c.pd/(dv-c.pd);else if(c.pd>=0&&dv<0)c.fz=d.n-1-c.pd/(dv-c.pd);
-const h=0.25*c.amp;
-if(c.st<=0&&dv>h){c.st=1;push(c,c.R,c.rz);c.rz=0}else if(c.st>=0&&dv<-h){c.st=-1;push(c,c.F,c.fz);c.fz=0}
-c.pd=dv}
-if(rec){d.hh=(d.hh+1)%1200;d.hn++}}
-d.gain=gain;for(const c of ch){const m=1/Math.hypot(c.sn,c.cs);c.sn*=m;c.cs*=m}}
-// beat frequencies for offset df: ref-1 -> |df+1|, ref0 -> |df|, ref+1 -> |df-1|
-// |df|<1 : df=(b-1 - b+1)/2 (both beats are ~1 Hz, so it settles fast even when df~0). |df|>=1 : |df|=b0, sign from b-1>b+1
-function result(){const d=D,ok=c=>c.est&&c.R.length+c.F.length>=4&&(d.n-c.last)/d.fs<Math.max(0.6,0.8/c.est),[m,z,p]=d.ch;
-if(!ok(m)||!ok(p))return null;const T=m.est-p.est,S=m.est+p.est;
-if(Math.abs(T)<1.9*OFS)return{df:T/2,how:t('how1',OFS)};
-return{df:(T>0?1:-1)*(ok(z)?z.est:S/2),how:t('how2')}}
-// ---- autocorrelation (NSDF + parabolic interpolation). Returns {f,cl} for the first strong peak in [fmin,fmax]
+// autocorrelation (NSDF + parabolic interpolation): {f,cl} of the first strong peak in [fmin,fmax], or null
 function nsdf(buf,fs,fmin,fmax,sp=1,W=4096){const t0=Math.max(2,Math.floor(fs/fmax)-1),t1=Math.min(4000,Math.ceil(fs/fmin)+1),b=buf.length-W-t1,N=new Float32Array(t1+2);
 let e=0;for(let j=0;j<W;j++)e+=buf[b+j]*buf[b+j];if(e/W<4e-6)return null;
 let mx=0;for(let t=t0;t<=t1;t++){let a=0,m=0;for(let j=0;j<W;j+=sp){const p=buf[b+j],q=buf[b+j+t];a+=p*q;m+=p*p+q*q}N[t]=m>0?2*a/m:0;if(N[t]>mx)mx=N[t]}
 if(mx<0.6)return null;
 for(let t=t0+1;t<t1;t++)if(N[t]>N[t-1]&&N[t]>=N[t+1]&&N[t]>=0.9*mx){const A=N[t-1],B=N[t],C=N[t+1],dn=A-2*B+C,sh=dn?0.5*(A-C)/dn:0;return{f:fs/(t+sh),cl:B}}return null}
-function ac(inp){AB.copyWithin(0,inp.length);AB.set(inp,AB.length-inp.length);const r=nsdf(AB,ctx.sampleRate,f0/1.6,f0*1.6);
-if(!r){AR.f=null;return}AR.f=(AR.f&&Math.abs(r.f-AR.f)/AR.f<0.02)?AR.f+0.5*(r.f-AR.f):r.f;AR.cl=r.cl}
-// ---- auto target: wide-band autocorrelation (no band-pass) names the note, then the target is moved to that note
-const AB2=new Float32Array(4096),AU={f:null,m:null,cnt:0};
-function setTarget(m){f0=+$('a4').value*Math.pow(2,(m-69)/12);$('hz').value=f0.toFixed(3);$('nn').value=m%12;$('oc').value=Math.floor(m/12)-1;last='note';apply()}
-function auto(inp){const n=inp.length>>1;AB2.copyWithin(0,n);for(let i=0;i<n;i++)AB2[AB2.length-n+i]=(inp[2*i]+inp[2*i+1])*0.5;   // 2:1 decimation (fs/2)
-if(AU.f&&Math.abs(1200*Math.log2(AU.f/f0))<30&&(AU.sk=!AU.sk))return;   // already on target: check every other hop to save CPU
-const r=nsdf(AB2,ctx.sampleRate/2,40,2000,2,2048);
-if(!r){AU.f=null;AU.cnt=0;return}
-AU.f=(AU.f&&Math.abs(r.f-AU.f)/AU.f<0.02)?AU.f+0.5*(r.f-AU.f):r.f;
-const m=Math.round(69+12*Math.log2(r.f/+$('a4').value));AU.cnt=m===AU.m?AU.cnt+1:1;AU.m=m;
-// switch only when the same note is seen 4 times in a row, clearly (>55 cents) away from the current target
-if(AU.cnt>=3&&r.cl>0.8&&m>=12&&m<=120&&Math.abs(1200*Math.log2(r.f/f0))>55)setTarget(m)}
+return class Engine{
+constructor(fs,post){this.fs=fs;this.post=post;this.mode='beat';this.auto=true;this.a4=440;this.f0=440;this.AB=new Float32Array(8192);this.AB2=new Float32Array(4096);
+this.AR={f:null,cl:0};this.AU={f:null,m:null,cnt:0,sk:false};this.aA=0;this.aC=0;this.aP=0;this.gen=0;this.tf=null;this.reset()}
+cfg(o){const r=o.reset||(o.f0!==undefined&&o.f0!==this.f0);for(const k of['mode','auto','a4','f0'])if(o[k]!==undefined)this[k]=o[k];
+if(o.auto!==undefined){this.AU.f=null;this.AU.cnt=0}if(r)this.reset()}
+reset(){const fs=this.fs,f0=this.f0,fc=Math.min(f0*0.45,60),mk=()=>[new BQ(lp(fc,fs)),new BQ(lp(fc,fs))];
+// three reference sines (f0-OFS, f0, f0+OFS), each summed with the mic signal and given its own beat detector
+this.ch=[-OFS,0,OFS].map(df=>{const w=2*Math.PI*(f0+df)/fs;return{sn:0,cs:1,cw:Math.cos(w),sw:Math.sin(w),L:mk(),mean:1,amp:0,pd:0,st:0,rz:0,fz:0,R:[],F:[],est:null,last:0,out:[]}});
+Object.assign(this,{gain:0,rms2:0,n:0,on:0,gate:false,dec:Math.max(1,Math.round(fs/200)),dc:0});this.AR.f=null;this.gen++}
+// feed 'a' (band-passed mic) and 'b' (raw mic); any block length
+process(a,b){const n=a.length;
+if(this.mode==='ac'){this.AB.copyWithin(0,n);this.AB.set(a,this.AB.length-n);if((this.aC+=n)>=2048){this.aC=0;this.ac()}}else this.beat(a);
+if(this.auto){const B=this.AB2,h=n>>1;B.copyWithin(0,h);for(let i=0;i<h;i++)B[B.length-h+i]=(b[2*i]+b[2*i+1])*0.5;   // 2:1 decimation
+if((this.aA+=n)>=1024){this.aA=0;this.det()}}
+if((this.aP+=n)>=2048){this.aP=0;this.emit()}}
+emit(){const c=this.ch;this.post({gen:this.gen,gate:this.gate,ests:c.map(x=>x.est),res:this.gate?this.result():null,AR:{f:this.AR.f,cl:this.AR.cl},AU:this.AU.f,tf:this.tf,hv:c.map(x=>x.out.splice(0))});this.tf=null}
+// ---- beat method: (mic + reference sine)^2 -> low-pass -> envelope; zero crossings (interpolated) give the beat period
+push(c,a,t){if(!t)return;if(a.length>=2){const p=(a[a.length-1]-a[0])/(a.length-1),q=(t-a[a.length-1])/p;if(q<0.7||q>1.43)a.length=0}
+a.push(t);while(a.length>7||(a.length>3&&t-a[0]>1.2*this.fs))a.shift();   // keep ~1.2 s of crossings so start-up transients age out
+c.last=this.n;let num=0,den=0;for(const b of[c.R,c.F])if(b.length>1){num+=b.length-1;den+=b[b.length-1]-b[0]}
+c.est=den>0?num/den*this.fs:null}
+beat(inp){const fs=this.fs,ka=1/(0.3*fs),kw=1/(0.05*fs),km=1/(6*fs),kd=1-1/(6*fs),W=0.25*fs,ch=this.ch;let gain=this.gain,rec;
+for(let i=0;i<inp.length;i++){const x=inp[i];this.n++;this.rms2+=(x*x-this.rms2)*(this.on<W?kw:ka);
+if((i&15)===0){this.gate=this.rms2>4e-6;gain=this.gate?0.7071/Math.sqrt(this.rms2):0}   // AGC gain refreshed every 16 samples
+this.on=this.gate?this.on+1:0;const y=Math.max(-2,Math.min(2,x*gain));rec=++this.dc>=this.dec;if(rec)this.dc=0;
+for(let k=0;k<3;k++){const c=ch[k],sn=c.sn*c.cw+c.cs*c.sw;c.cs=c.cs*c.cw-c.sn*c.sw;c.sn=sn;   // rotating oscillator
+const s=y+sn,v=c.L[1].p(c.L[0].p(s*s));if(rec)c.out.push(v);
+if(this.on<W){c.mean=1;c.amp=0;c.R.length=c.F.length=0;c.est=null;c.st=0;c.pd=0;continue}   // warm-up: let AGC and filters settle
+const m=c.mean;c.mean+=(v-m)*km;const dv=v-m;c.amp=Math.max(Math.abs(dv),c.amp*kd);
+if(c.pd<=0&&dv>0)c.rz=this.n-1-c.pd/(dv-c.pd);else if(c.pd>=0&&dv<0)c.fz=this.n-1-c.pd/(dv-c.pd);
+const h=0.25*c.amp;
+if(c.st<=0&&dv>h){c.st=1;this.push(c,c.R,c.rz);c.rz=0}else if(c.st>=0&&dv<-h){c.st=-1;this.push(c,c.F,c.fz);c.fz=0}
+c.pd=dv}}
+this.gain=gain;for(const c of ch){const m=1/Math.hypot(c.sn,c.cs);c.sn*=m;c.cs*=m}}
+// Beat frequencies for the input offset d = f - f0:  ref(-OFS) -> |d+OFS|,  ref(0) -> |d|,  ref(+OFS) -> |d-OFS|.
+// |d| < OFS : d = (b- - b+)/2 (both beats are about OFS Hz, so even d = 0 settles quickly; the sign comes for free).
+// |d| >= OFS: |d| = b0 (or (b- + b+)/2), sign from b- > b+.
+result(){const[m,z,p]=this.ch,ok=c=>c.est&&c.R.length+c.F.length>=4&&(this.n-c.last)/this.fs<Math.max(0.6,0.8/c.est);
+if(!ok(m)||!ok(p))return null;const T=m.est-p.est,S=m.est+p.est;
+if(Math.abs(T)<1.9*OFS)return{df:T/2,how:'how1'};return{df:(T>0?1:-1)*(ok(z)?z.est:S/2),how:'how2'}}
+// ---- autocorrelation method: narrow search around the target
+ac(){const r=nsdf(this.AB,this.fs,this.f0/1.6,this.f0*1.6),R=this.AR;if(!r){R.f=null;return}R.f=(R.f&&Math.abs(r.f-R.f)/R.f<0.02)?R.f+0.5*(r.f-R.f):r.f;R.cl=r.cl}
+// ---- auto target: wide-band autocorrelation names the note, then the target moves to it
+det(){const U=this.AU;if(U.f&&Math.abs(1200*Math.log2(U.f/this.f0))<30&&(U.sk=!U.sk))return;   // already on target: every other hop
+const r=nsdf(this.AB2,this.fs/2,40,2000,2,2048);if(!r){U.f=null;U.cnt=0;return}
+U.f=(U.f&&Math.abs(r.f-U.f)/U.f<0.02)?U.f+0.5*(r.f-U.f):r.f;
+const m=Math.round(69+12*Math.log2(r.f/this.a4));U.cnt=m===U.m?U.cnt+1:1;U.m=m;
+// switch only after 3 identical detections in a row, clearly (>55 cents) away from the current target
+if(U.cnt>=3&&r.cl>0.8&&m>=12&&m<=120&&Math.abs(1200*Math.log2(r.f/this.f0))>55){this.f0=this.a4*Math.pow(2,(m-69)/12);this.tf=this.f0;this.reset()}}
+}}
+// ---- main-thread glue
+const MODSRC=()=>`const Engine=(${EngineFactory.toString()})();registerProcessor('tuner',class extends AudioWorkletProcessor{constructor(){super();this.e=new Engine(sampleRate,s=>this.port.postMessage(s));this.port.onmessage=m=>{if(m.data.cfg)this.e.cfg(m.data.cfg)}}process(i){const a=i[0][0];if(a)this.e.process(a,i[0][1]||a);return true}});`;
+const cfg=o=>{W?W.port.postMessage({cfg:o}):ENG&&ENG.cfg(o)},setBP=()=>{if(bp1)bp1.frequency.value=bp2.frequency.value=f0};
+function onState(s){S=s;if(s.gen!==gen){gen=s.gen;hh=hn=0}   // engine was reset: start a new waveform history
+const n=s.hv[0].length;for(let i=0;i<n;i++){for(let j=0;j<3;j++)HV[j][hh]=s.hv[j][i];hh=(hh+1)%1200;hn++}
+if(s.tf!=null)onTarget(s.tf)}
+function onTarget(f){f0=f;$('hz').value=f0.toFixed(3);near();last='note';setBP();tone();sv($('t'),f0.toFixed(3)+' Hz')}   // target chosen by auto mode
 // ---- audio setup
 function tone(){if(!ctx)return;if(osc){try{osc.stop()}catch(e){}osc.disconnect();osc=null}
 if($('rf').checked){osc=ctx.createOscillator();osc.frequency.value=f0;const g=ctx.createGain();g.gain.value=0.15;osc.connect(g).connect(ctx.destination);osc.start()}}
 $('rf').onchange=tone;
 async function start(){try{stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
 ctx=new(window.AudioContext||window.webkitAudioContext)({latencyHint:'interactive'});await ctx.resume();
-const src=ctx.createMediaStreamSource(stream);bp1=ctx.createBiquadFilter();bp2=ctx.createBiquadFilter();bp1.type=bp2.type='bandpass';bp1.Q.value=bp2.Q.value=3;
-node=ctx.createScriptProcessor(2048,1,1);const mu=ctx.createGain();mu.gain.value=0;
-src.connect(bp1);bp1.connect(bp2);bp2.connect(node);node.connect(mu);mu.connect(ctx.destination);
-node.onaudioprocess=e=>{const inp=e.inputBuffer.getChannelData(0);D.mode==='ac'?ac(inp):beat(inp)};
-nodeA=ctx.createScriptProcessor(1024,1,1);src.connect(nodeA);nodeA.connect(mu);nodeA.onaudioprocess=e=>{if($('au').checked)auto(e.inputBuffer.getChannelData(0))};
-D.mode=$('md').value;resetDSP();tone();$('st').textContent=t('stop');const sr=ctx.sampleRate;setMsg(()=>t('running',sr));
+const src=ctx.createMediaStreamSource(stream),mg=ctx.createChannelMerger(2),mu=ctx.createGain();mu.gain.value=0;mu.connect(ctx.destination);
+bp1=ctx.createBiquadFilter();bp2=ctx.createBiquadFilter();bp1.type=bp2.type='bandpass';bp1.Q.value=bp2.Q.value=3;
+src.connect(bp1);bp1.connect(bp2);bp2.connect(mg,0,0);src.connect(mg,0,1);setBP();   // ch0: band-passed mic, ch1: raw mic
+let kind='AudioWorklet';
+try{await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([MODSRC()],{type:'text/javascript'})));
+W=new AudioWorkletNode(ctx,'tuner',{numberOfInputs:1,numberOfOutputs:1,outputChannelCount:[1],channelCount:2,channelCountMode:'explicit'});
+W.port.onmessage=e=>onState(e.data);mg.connect(W);W.connect(mu)}
+catch(e){kind='ScriptProcessor';W=null;ENG=new(EngineFactory())(ctx.sampleRate,onState);const sp=ctx.createScriptProcessor(1024,2,1);   // fallback
+sp.onaudioprocess=ev=>ENG.process(ev.inputBuffer.getChannelData(0),ev.inputBuffer.getChannelData(1));mg.connect(sp);sp.connect(mu);ENG.sp=sp}
+M=$('md').value;cfg({f0,mode:M,auto:$('au').checked,a4:+$('a4').value,reset:true});tone();
+$('st').textContent=t('stop');const sr=ctx.sampleRate;setMsg(()=>t('running',sr,kind));
 }catch(err){setMsg(()=>t('micerr',err.message))}}
-function stop(){stream&&stream.getTracks().forEach(t=>t.stop());node&&(node.onaudioprocess=null);nodeA&&(nodeA.onaudioprocess=null);ctx&&ctx.close();ctx=null;osc=null;$('st').textContent=t('start');setMsg(()=>t('stopped'))}
+function stop(){stream&&stream.getTracks().forEach(k=>k.stop());ENG&&ENG.sp&&(ENG.sp.onaudioprocess=null);W&&(W.port.onmessage=null);ctx&&ctx.close();ctx=null;osc=null;W=null;ENG=null;S=null;
+$('st').textContent=t('start');setMsg(()=>t('stopped'))}
 $('st').onclick=()=>ctx?stop():start();
 // ---- display
 const G=$('g');let h='';for(let c=-50;c<=50;c+=10)h+=`<i class="${c?'':'c'}" style="left:${50+c}%"></i>`;G.innerHTML=h+'<b id="mk" style="left:50%"></b>';
@@ -171,21 +194,20 @@ sv($('s'),note);mk.style.left=(50+Math.max(-50,Math.min(50,ct)))+'%';mk.classNam
 sv($('f'),f.toFixed(3)+' Hz');sv($('c'),(ct>=0?'+':'')+ct.toFixed(2)+' ct')}
 const cv=$('cv');
 function draw(){const r=devicePixelRatio||1,w=cv.clientWidth,h=cv.clientHeight;if(cv.width!==Math.round(w*r)||cv.height!==Math.round(h*r)){cv.width=Math.round(w*r);cv.height=Math.round(h*r)}
-const key=(ctx?1:0)+D.mode+D.hn+LG+w;if(draw.k===key)return;draw.k=key;   // redraw only when there is new data
+const key=(ctx?1:0)+M+hn+LG+w;if(draw.k===key)return;draw.k=key;   // redraw only when there is new data
 const c=cv.getContext('2d'),g=k=>COL[k]||(COL[k]=getComputedStyle(document.documentElement).getPropertyValue(k).trim()),T0=20,lh=(h-T0)/3;
 c.setTransform(r,0,0,r,0,0);c.clearRect(0,0,w,h);c.strokeStyle=g('--ln');c.lineWidth=1;c.beginPath();
 for(let k=0;k<=3;k++){c.moveTo(0,T0+k*lh);c.lineTo(w,T0+k*lh)}c.stroke();c.fillStyle=g('--mut');c.font='11px sans-serif';
-if(!ctx||D.mode==='ac'||!D.ch){c.fillText(t(!ctx?'cvnone':'cvac'),8,14);return}
+if(!ctx||M==='ac'||!S){c.fillText(t(!ctx?'cvnone':'cvac'),8,14);return}
 c.fillText(t('cvt'),8,14);
-const n=Math.min(D.hn,1200),s=D.hn>=1200?D.hh:0;
-D.ch.forEach((ch,j)=>{const y0=T0+j*lh;c.fillStyle=g('--mut');c.fillText(t(['laneM','lane0','laneP'][j],OFS),8,y0+12);if(n<2)return;
+const n=Math.min(hn,1200),s=hn>=1200?hh:0;
+HV.forEach((hv,j)=>{const y0=T0+j*lh;c.fillStyle=g('--mut');c.fillText(t(['laneM','lane0','laneP'][j],OFS),8,y0+12);if(n<2)return;
 c.strokeStyle=g('--fg');c.lineWidth=1.5;c.beginPath();
-for(let k=0;k<n;k+=2){const x=w-(n-k)*w/1200,y=y0+lh*(1-Math.min(2,ch.hv[(s+k)%1200])/2);k?c.lineTo(x,y):c.moveTo(x,y)}c.stroke()})}
-function loop(){requestAnimationFrame(loop);draw();if(!ctx){return}
+for(let k=0;k<n;k+=2){const x=w-(n-k)*w/1200,y=y0+lh*(1-Math.min(2,hv[(s+k)%1200])/2);k?c.lineTo(x,y):c.moveTo(x,y)}c.stroke()})}
+function loop(){requestAnimationFrame(loop);draw();if(!ctx||!S)return;
 const A=$('au').checked,pre=A?t('autop',NM[+$('nn').value]+$('oc').value):'';
-if(D.mode==='ac'){sv($('x'),AR.f?t('acinfo',AR.cl.toFixed(2)):'-');AR.f?show(AR.f-f0,pre+t('acrt')):show(null,A&&AU.f?t('detecting'):t('wait'));return}
-const r=D.gate?result():null;sv($('x'),D.gate?t('beatinfo',D.ch.map(c=>c.est?c.est.toFixed(3):'-').join(' / ')):'-');
-if(r)show(r.df,pre+r.how);
-else show(null,D.gate?t('measuring'):A&&AU.f?t('detecting'):t('wait'))}
+if(M==='ac'){const a=S.AR;sv($('x'),a.f?t('acinfo',a.cl.toFixed(2)):'-');a.f?show(a.f-f0,pre+t('acrt')):show(null,A&&S.AU?t('detecting'):t('wait'));return}
+const r=S.res;sv($('x'),S.gate?t('beatinfo',S.ests.map(e=>e?e.toFixed(3):'-').join(' / ')):'-');
+if(r)show(r.df,pre+t(r.how,OFS));else show(null,S.gate?t('measuring'):A&&S.AU?t('detecting'):t('wait'))}
 applyLang();fromNote();loop();
 </script></body></html>
