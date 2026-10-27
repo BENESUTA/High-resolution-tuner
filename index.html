@@ -117,7 +117,7 @@ reset(){const fs=this.fs,f0=this.f0,fc=Math.min(f0*0.45,60),mk=()=>[new BQ(lp(fc
 this.ch=[-OFS,0,OFS].map(df=>{const w=2*Math.PI*(f0+df)/fs;return{sn:0,cs:1,cw:Math.cos(w),sw:Math.sin(w),L:mk(),mean:1,amp:0,pd:0,st:0,rz:0,fz:0,R:[],F:[],est:null,last:0,out:[]}});
 Object.assign(this,{gain:0,rms2:0,n:0,on:0,gate:false,dec:Math.max(1,Math.round(fs/200)),dc:0});this.AR.f=null;this.gen++}
 // feed 'a' (band-passed mic) and 'b' (raw mic); any block length
-process(a,b){const n=a.length;
+process(a,b){const n=a.length;this.tn=(this.tn||0)+n;
 if(this.mode==='ac'){this.AB.copyWithin(0,n);this.AB.set(a,this.AB.length-n);if((this.aC+=n)>=2048){this.aC=0;this.ac()}}else this.beat(a);
 if(this.auto){const B=this.AB2,h=n>>1;B.copyWithin(0,h);for(let i=0;i<h;i++)B[B.length-h+i]=(b[2*i]+b[2*i+1])*0.5;   // 2:1 decimation
 if((this.aA+=n)>=1024){this.aA=0;this.det()}}
@@ -150,12 +150,17 @@ if(Math.abs(T)<1.9*OFS)return{df:T/2,how:'how1'};return{df:(T>0?1:-1)*(ok(z)?z.e
 // ---- autocorrelation method: narrow search around the target
 ac(){const r=nsdf(this.AB,this.fs,this.f0/1.6,this.f0*1.6),R=this.AR;if(!r){R.f=null;return}R.f=(R.f&&Math.abs(r.f-R.f)/R.f<0.02)?R.f+0.5*(r.f-R.f):r.f;R.cl=r.cl}
 // ---- auto target: wide-band autocorrelation names the note, then the target moves to it
-det(){const U=this.AU;if(U.f&&Math.abs(1200*Math.log2(U.f/this.f0))<30&&(U.sk=!U.sk))return;   // already on target: every other hop
-const r=nsdf(this.AB2,this.fs/2,40,2000,2,2048);if(!r){U.f=null;U.cnt=0;return}
+det(){const U=this.AU,B=this.AB2;if(U.f&&Math.abs(1200*Math.log2(U.f/this.f0))<30&&(U.sk=!U.sk))return;   // already on target: every other hop
+let e=0;for(let i=B.length-2048;i<B.length;i++)e+=B[i]*B[i];
+const r=e>0.02?nsdf(B,this.fs/2,40,2000,2,2048):null;   // mean power < 1e-5: too quiet to name a note
+if(!r||r.cl<0.85){U.f=null;U.cnt=0;return}
 U.f=(U.f&&Math.abs(r.f-U.f)/U.f<0.02)?U.f+0.5*(r.f-U.f):r.f;
-const m=Math.round(69+12*Math.log2(r.f/this.a4));U.cnt=m===U.m?U.cnt+1:1;U.m=m;
-// switch only after 3 identical detections in a row, clearly (>55 cents) away from the current target
-if(U.cnt>=3&&r.cl>0.8&&m>=12&&m<=120&&Math.abs(1200*Math.log2(r.f/this.f0))>55){this.f0=this.a4*Math.pow(2,(m-69)/12);this.tf=this.f0;this.reset()}}
+const m=Math.round(69+12*Math.log2(r.f/this.a4));
+if(m===U.m)U.cnt++;else{U.cnt=1;U.m=m}
+// Anti-chatter: a new note must repeat consistently and lie clearly (>60 cents) away from the current target. Octave/fifth-type jumps
+// (typical harmonic mis-detections) need a longer run, and every switch is followed by a 0.3 s lock-out.
+const cur=1200*Math.log2(r.f/this.f0),d=Math.abs(Math.round(cur/100))%12,need=(d===0||d===7)?10:4;
+if(U.cnt>=need&&this.tn>=(U.lock||0)&&m>=12&&m<=120&&Math.abs(cur)>60){this.f0=this.a4*Math.pow(2,(m-69)/12);this.tf=this.f0;U.lock=this.tn+0.3*this.fs;U.cnt=0;this.reset()}}
 }}
 // ---- main-thread glue
 const MODSRC=()=>`const Engine=(${EngineFactory.toString()})();registerProcessor('tuner',class extends AudioWorkletProcessor{constructor(){super();this.e=new Engine(sampleRate,s=>this.port.postMessage(s));this.port.onmessage=m=>{if(m.data.cfg)this.e.cfg(m.data.cfg)}}process(i){const a=i[0][0];if(a)this.e.process(a,i[0][1]||a);return true}});`;
